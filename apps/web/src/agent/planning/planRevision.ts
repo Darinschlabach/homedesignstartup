@@ -41,6 +41,10 @@ function mergeCompletionChecks(existing: string[], incoming: string[]): string[]
   return [...new Set([...existing, ...incoming])];
 }
 
+function outcomeRequirementKey(outcome: PlannedOutcome): string {
+  return `${outcome.domain}:${JSON.stringify(outcome.verification)}`;
+}
+
 /**
  * Merge a revised plan into an existing one. Preserves objective, constraints, and
  * required outcomes unless explicitly superseded with a reason.
@@ -80,14 +84,9 @@ export function mergeTaskPlanRevision(
 
   for (const outcome of existing.requiredOutcomes) {
     if (supersedeOutcomes.has(outcome.id)) {
-      outcomeById.set(outcome.id, {
-        ...outcome,
-        status: "blocked",
-        blockedReason: supersedeOutcomes.get(outcome.id),
-      });
-      supersededOutcomeIds.push(outcome.id);
+      outcomeById.set(outcome.id, { ...outcome });
       notes.push(
-        `Outcome ${outcome.id} marked blocked (superseded): ${supersedeOutcomes.get(outcome.id)}`,
+        `Ignored attempted supersession of required outcome ${outcome.id}; a runtime failure does not remove a user requirement.`,
       );
       continue;
     }
@@ -98,12 +97,24 @@ export function mergeTaskPlanRevision(
   for (const outcome of incoming.requiredOutcomes) {
     const prev = outcomeById.get(outcome.id);
     if (prev) {
-      outcomeById.set(outcome.id, {
-        ...prev,
-        description: outcome.description,
-        domain: outcome.domain,
-        verification: outcome.verification,
-      });
+      const changedRequirement =
+        prev.description !== outcome.description ||
+        prev.domain !== outcome.domain ||
+        JSON.stringify(prev.verification) !== JSON.stringify(outcome.verification);
+      if (changedRequirement) {
+        notes.push(
+          `Ignored attempted rewrite of required outcome ${outcome.id}; existing requirement and verification were preserved. Add a new outcome id for an additional requirement.`,
+        );
+      }
+      continue;
+    }
+    const semanticMatch = [...outcomeById.values()].find(
+      (candidate) => outcomeRequirementKey(candidate) === outcomeRequirementKey(outcome),
+    );
+    if (semanticMatch) {
+      notes.push(
+        `Merged duplicate outcome ${outcome.id} into existing requirement ${semanticMatch.id}.`,
+      );
       continue;
     }
     outcomeById.set(outcome.id, { ...outcome, status: "pending" });
@@ -138,12 +149,16 @@ export function mergeTaskPlanRevision(
 
   for (const constraint of incoming.constraints) {
     if (constraintById.has(constraint.id)) {
-      constraintById.set(constraint.id, {
-        ...constraintById.get(constraint.id)!,
-        kind: constraint.kind,
-        description: constraint.description,
-        entityId: constraint.entityId,
-      });
+      const prev = constraintById.get(constraint.id)!;
+      if (
+        prev.kind !== constraint.kind ||
+        prev.description !== constraint.description ||
+        prev.entityId !== constraint.entityId
+      ) {
+        notes.push(
+          `Ignored attempted rewrite of constraint ${constraint.id}; the original user constraint was preserved.`,
+        );
+      }
       continue;
     }
     constraintById.set(constraint.id, { ...constraint });

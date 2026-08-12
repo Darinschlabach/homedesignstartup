@@ -72,9 +72,13 @@ export const modifyStairTool = tool({
     });
 
     const fail = (payload: Record<string, unknown>) => {
-      const code = typeof payload.code === "string" ? payload.code : undefined;
+      const validation = payload.validation as
+        | { issues?: Array<{ code?: string }> }
+        | undefined;
+      const validationCode = validation?.issues?.[0]?.code;
       recordToolFailure(context?.loopSafety, "modify_stair", args, {
-        validationFailure: Boolean(code),
+        validationFailure: Boolean(validationCode),
+        validationCode,
       });
       homeDesignAgentDevLog("modify_stair_execute_end", {
         tool: "modify_stair",

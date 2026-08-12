@@ -9,6 +9,7 @@ import {
   summarizePlan,
   type OutcomeStatus,
 } from "../planning/taskPlan";
+import { activeDependencyBlocks } from "../planning/mutationGuard";
 import { operationMeta } from "../operation/agentOperation";
 import { loadAgentModel } from "../project/loadAgentModel";
 
@@ -93,6 +94,7 @@ export const checkOperationProgressTool = tool({
       metrics: op.runMetrics,
       replanSuggested: context?.loopSafety?.replanSuggested,
       replanReason: context?.loopSafety?.replanReason,
+      blockedDependencies: activeDependencyBlocks(context?.loopSafety),
     });
 
     return {

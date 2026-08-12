@@ -17,7 +17,7 @@ import { designRunner } from "@/agent/runner";
 import type { CompletionReport } from "@/agent/planning/taskPlan";
 import { getLatestRevision, parseModel, requireUser } from "@/lib/projects";
 
-const MAX_COMPLETION_CONTINUATIONS = 1;
+const MAX_COMPLETION_CONTINUATIONS = 2;
 
 function buildContinuationPrompt(
   report: CompletionReport | undefined,

@@ -18,6 +18,7 @@ import {
   type OperationRunMetrics,
   type TaskPlan,
 } from "../planning/taskPlan";
+import { activeDependencyBlocks } from "../planning/mutationGuard";
 import { noteValidationFailure } from "../loopSafety";
 
 /** Serialize mutating stages so parallel tool calls cannot interleave writes. */
@@ -370,6 +371,7 @@ export async function commitAgentOperation(
       metrics: op.runMetrics,
       replanSuggested: context.loopSafety?.replanSuggested,
       replanReason: context.loopSafety?.replanReason,
+      blockedDependencies: activeDependencyBlocks(context.loopSafety),
     });
 
     const planningRequired = suggestsStructuredPlanning(op.userMessage);

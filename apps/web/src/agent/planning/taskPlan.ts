@@ -24,6 +24,7 @@ export type ConstraintKind =
 
 export type OutcomeVerification =
   | { type: "min_level_count"; min: number }
+  | { type: "partial_upper_level" }
   | { type: "min_space_count"; min: number }
   | { type: "min_spaces_with_tag"; tag: string; min: number }
   | { type: "vertical_circulation" }
@@ -37,6 +38,58 @@ export type PlannedConstraint = {
   description: string;
   entityId?: string;
 };
+
+export type ConstraintIntentClassification = {
+  supported: boolean;
+  deterministic: boolean;
+  reason?: string;
+};
+
+export function isContradictoryPreservationOutcome(
+  description: string,
+  verification: OutcomeVerification,
+): boolean {
+  if (verification.type !== "domain_changed") return false;
+  return /\b(?:unchanged|preserv(?:e|ed|ing)|remain(?:s|ed)?\s+(?:the\s+)?same|do not change|don't change|without changing)\b/i.test(
+    description,
+  );
+}
+
+/**
+ * Deterministic preservation constraints must be grounded in an explicit user
+ * request. In particular, geometry_unchanged is universal and cannot be inferred
+ * from a subjective visual objective merely because it uses words like "keep".
+ */
+export function classifyConstraintIntent(
+  userMessage: string,
+  kind: ConstraintKind,
+): ConstraintIntentClassification {
+  if (kind !== "geometry_unchanged") {
+    return { supported: true, deterministic: true };
+  }
+
+  const message = userMessage.toLowerCase();
+  const explicitlyNamesGeometry = /\bgeometry\b/.test(message);
+  const explicitlyPreserves =
+    /\b(?:without|do not|don't|must not|never)\b[^.!?;]{0,80}\b(?:change|changing|alter|altering|modify|modifying|touch|touching)\b/.test(
+      message,
+    ) ||
+    /\b(?:keep|preserve)\b[^.!?;]{0,80}\bgeometry\b[^.!?;]{0,40}\b(?:unchanged|same|intact)\b/.test(
+      message,
+    ) ||
+    /\bgeometry\b[^.!?;]{0,40}\b(?:unchanged|the same|intact)\b/.test(message);
+
+  if (explicitlyNamesGeometry && explicitlyPreserves) {
+    return { supported: true, deterministic: true };
+  }
+
+  return {
+    supported: false,
+    deterministic: false,
+    reason:
+      "geometry_unchanged requires an explicit user instruction preserving geometry; subjective visual or massing objectives must use manual/visual outcomes instead.",
+  };
+}
 
 export type PlannedOutcome = {
   id: string;
@@ -182,6 +235,23 @@ function hasVerticalCirculation(model: BuildingModelV1): boolean {
       levelIds.has(s.toLevelId) &&
       s.fromLevelId !== s.toLevelId,
   );
+}
+
+function hasPartialUpperLevel(model: BuildingModelV1): boolean {
+  const shell = model.shell;
+  if (!shell || model.levels.length < 2) return false;
+  const baseArea = shell.width * shell.depth;
+  const lowestElevation = Math.min(...model.levels.map((level) => level.elevation));
+  return model.levels.some((level) => {
+    if (level.elevation <= lowestElevation || level.footprintSource !== "custom") {
+      return false;
+    }
+    const footprint = level.footprint;
+    return Boolean(
+      footprint &&
+        footprint.width * footprint.depth < baseArea - 1e-6,
+    );
+  });
 }
 
 /** When levels were added, the plan must address circulation and the model must have stairs. */
@@ -343,10 +413,6 @@ export function verifyOutcome(
   if (outcome.status === "blocked") {
     return { satisfied: false, reason: outcome.blockedReason ?? "Blocked." };
   }
-  if (outcome.status === "satisfied" && outcome.verification.type === "manual") {
-    return { satisfied: true };
-  }
-
   const v = outcome.verification;
   switch (v.type) {
     case "min_level_count":
@@ -355,6 +421,14 @@ export function verifyOutcome(
         : {
             satisfied: false,
             reason: `Level count ${workingModel.levels?.length ?? 0} < ${v.min}.`,
+          };
+    case "partial_upper_level":
+      return hasPartialUpperLevel(workingModel)
+        ? { satisfied: true }
+        : {
+            satisfied: false,
+            reason:
+              "No upper level has a custom footprint materially smaller than the first-floor shell footprint.",
           };
     case "min_space_count":
       return (workingModel.spaces?.length ?? 0) >= v.min
@@ -388,16 +462,38 @@ export function verifyOutcome(
             reason: `No staged changes in domain "${v.domain}".`,
           };
     case "visual_verified":
-      return metrics.renderPreviewSuccessCount > 0
-        ? { satisfied: true }
-        : {
-            satisfied: false,
-            reason: "No successful render_preview this operation.",
-          };
+      if (metrics.renderPreviewSuccessCount === 0) {
+        return {
+          satisfied: false,
+          reason: "No successful render_preview this operation.",
+        };
+      }
+      if (
+        outcome.domain !== "visual" &&
+        outcome.domain !== "other" &&
+        !domainChanged(stagedOps, outcome.domain)
+      ) {
+        return {
+          satisfied: false,
+          reason: `Visual inspection occurred, but no staged changes were made in outcome domain "${outcome.domain}".`,
+        };
+      }
+      return { satisfied: true };
     case "manual":
-      return outcome.status === "satisfied"
-        ? { satisfied: true }
-        : { satisfied: false, reason: "Manual outcome not marked satisfied." };
+      if (outcome.status !== "satisfied") {
+        return { satisfied: false, reason: "Manual outcome not marked satisfied." };
+      }
+      if (
+        outcome.domain !== "visual" &&
+        outcome.domain !== "other" &&
+        !domainChanged(stagedOps, outcome.domain)
+      ) {
+        return {
+          satisfied: false,
+          reason: `Manual outcome was marked satisfied, but no staged changes were made in outcome domain "${outcome.domain}".`,
+        };
+      }
+      return { satisfied: true };
     default:
       return { satisfied: false, reason: "Unknown verification type." };
   }
@@ -412,6 +508,7 @@ export function assessOperationCompletion(options: {
   metrics: OperationRunMetrics;
   replanSuggested?: boolean;
   replanReason?: string;
+  blockedDependencies?: string[];
 }): CompletionReport {
   const planningRequired = suggestsStructuredPlanning(options.userMessage);
   const turnEfficiencyNotes: string[] = [];
@@ -502,6 +599,7 @@ export function assessOperationCompletion(options: {
       options.plan,
     ),
   );
+  missingChecks.push(...(options.blockedDependencies ?? []));
 
   const readyToCommit =
     pendingOutcomeIds.length === 0 &&

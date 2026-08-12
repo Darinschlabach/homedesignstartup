@@ -42,6 +42,7 @@ export function deriveDependencyHints(
   switch (issue.code) {
     case "STAIR_OUTSIDE_UPPER_FOOTPRINT":
     case "STAIR_OUTSIDE_FOOTPRINT":
+    case "STAIR_OPENING_OUTSIDE_SLAB":
       return {
         affectedObjectIds: entityId ? [entityId] : undefined,
         affectedLevelIds: levelIds.length ? levelIds : undefined,

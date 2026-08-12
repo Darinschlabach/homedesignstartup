@@ -125,9 +125,13 @@ export const createStairTool = tool({
     });
 
     const fail = (payload: Record<string, unknown>) => {
-      const code = typeof payload.code === "string" ? payload.code : undefined;
+      const validation = payload.validation as
+        | { issues?: Array<{ code?: string }> }
+        | undefined;
+      const validationCode = validation?.issues?.[0]?.code;
       recordToolFailure(context?.loopSafety, "create_stair", args, {
-        validationFailure: Boolean(code),
+        validationFailure: Boolean(validationCode),
+        validationCode,
       });
       homeDesignAgentDevLog("create_stair_execute_end", {
         tool: "create_stair",
@@ -210,7 +214,7 @@ export const createStairTool = tool({
           beforeStairs,
           operation: operationMeta(context),
           limitationNote:
-            "Supported types: straight, lShape. Spiral / U-shaped / curved / winders are not available. Domain derives tread/riser math — adjust placement, width, or availableRun and retry.",
+            "Supported types: straight, lShape. Spiral / U-shaped / curved / winders are not available. Domain derives tread/riser math. Use geometryHint.bounds versus inspected level bounds to move the entire stair inside both footprints before retrying; origin is the first riser, not the stair center.",
         });
       }
 

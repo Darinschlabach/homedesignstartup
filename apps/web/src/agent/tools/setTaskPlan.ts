@@ -6,6 +6,8 @@ import type { DesignAgentContext } from "../context/agentContext";
 import { mergeTaskPlanRevision } from "../planning/planRevision";
 import {
   suggestsStructuredPlanning,
+  classifyConstraintIntent,
+  isContradictoryPreservationOutcome,
   summarizePlan,
   type ConstraintKind,
   type OutcomeVerification,
@@ -44,6 +46,7 @@ const planDomainSchema = z.enum([
 
 const verificationSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("min_level_count"), min: z.number().int().positive() }),
+  z.object({ type: z.literal("partial_upper_level") }),
   z.object({ type: z.literal("min_space_count"), min: z.number().int().positive() }),
   z.object({
     type: z.literal("min_spaces_with_tag"),
@@ -92,6 +95,7 @@ const setTaskPlanParameters = z
             verification: verificationSchema.describe(
               "Use vertical_circulation when multi-level access is required. " +
                 "Use visual_verified or manual for subjective design goals (balanced massing, not top-heavy, more interesting exterior). " +
+                "Use partial_upper_level when the user requires a partial, reduced, or setback upper story; min_level_count alone does not verify that geometry. " +
                 "Use domain_changed when a domain must be materially edited.",
             ),
           })
@@ -180,23 +184,51 @@ export const setTaskPlanTool = tool({
       };
     }
 
-    const incomingOutcomes: PlannedOutcome[] = args.requiredOutcomes.map(
-      (o): PlannedOutcome => ({
-        id: o.id,
-        description: o.description,
-        domain: o.domain as PlanDomain,
-        verification: o.verification as OutcomeVerification,
-        status: "pending",
-      }),
+    const rejectedOutcomes: Array<{ id: string; reason: string }> = [];
+    const incomingOutcomes: PlannedOutcome[] = args.requiredOutcomes.flatMap(
+      (o): PlannedOutcome[] => {
+        if (
+          isContradictoryPreservationOutcome(
+            o.description,
+            o.verification as OutcomeVerification,
+          )
+        ) {
+          rejectedOutcomes.push({
+            id: o.id,
+            reason:
+              "A preservation requirement cannot be verified by changing that domain; represent it as a deterministic constraint instead.",
+          });
+          return [];
+        }
+        return [{
+          id: o.id,
+          description: o.description,
+          domain: o.domain as PlanDomain,
+          verification: o.verification as OutcomeVerification,
+          status: "pending",
+        }];
+      },
     );
 
-    const incomingConstraints: PlannedConstraint[] = args.constraints.map(
-      (c): PlannedConstraint => ({
+    const rejectedConstraints: Array<{ id: string; kind: string; reason: string }> = [];
+    const incomingConstraints: PlannedConstraint[] = args.constraints.flatMap(
+      (c): PlannedConstraint[] => {
+        const classification = classifyConstraintIntent(op.userMessage, c.kind as ConstraintKind);
+        if (!classification.supported) {
+          rejectedConstraints.push({
+            id: c.id,
+            kind: c.kind,
+            reason: classification.reason ?? "Constraint is not grounded in the user request.",
+          });
+          return [];
+        }
+        return [{
         id: c.id,
         kind: c.kind as ConstraintKind,
         description: c.description,
         entityId: c.entityId ?? undefined,
-      }),
+        }];
+      },
     );
 
     const incomingPartial = {
@@ -246,6 +278,8 @@ export const setTaskPlanTool = tool({
       revised: hadExistingPlan,
       isRevision: hadExistingPlan,
       revisionNotes,
+      rejectedConstraints,
+      rejectedOutcomes,
       suggestedPlanningForRequest: suggested,
       plan: summarizePlan(plan),
       constraintKindGuidance: CONSTRAINT_KIND_GUIDANCE,

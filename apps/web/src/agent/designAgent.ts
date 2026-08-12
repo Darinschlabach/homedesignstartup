@@ -71,7 +71,10 @@ STRUCTURED PLANNING (coordinated requests only):
 - For trivial single-domain edits (one opening resize, one material swap, one roof pitch tweak), proceed directly — no task plan required.
 - For medium/large requests involving multiple domains, multiple constraints, or several required outcomes: call set_task_plan BEFORE the first mutation.
 - Derive the plan from the user message: objective, explicit constraints, required outcomes (each with a verifiable check), affected domains, dependencies, and completion checks.
-- Outcome verification types you may use: min_level_count, min_space_count, min_spaces_with_tag, vertical_circulation (required whenever the plan adds upper levels or requires a usable multi-story building), domain_changed, visual_verified, manual (subjective design goals).
+- Outcome verification types you may use: min_level_count, partial_upper_level (required when the user asks for a partial/reduced/setback upper story), min_space_count, min_spaces_with_tag, vertical_circulation (required whenever the plan adds upper levels or requires a usable multi-story building), domain_changed, visual_verified, manual (subjective design goals).
+- visual_verified outcomes tied to a model domain require BOTH a staged mutation in that domain and a successful preview. Use domain "visual" only for a purely observational goal; never use it to stand in for an explicitly requested model-domain change.
+- manual outcomes tied to a model domain likewise require a staged mutation in that domain; marking an outcome satisfied cannot substitute for performing the requested edit.
+- Preservation requirements belong in deterministic constraints. Never create a domain_changed outcome whose description says that domain must remain unchanged or be preserved.
 - CONSTRAINT CLASSIFICATION (critical): deterministic constraint kinds verify exact model preservation. Use them ONLY when the user explicitly asked to preserve that property:
   • footprint_unchanged — user said do not change the building shell footprint (e.g. "without changing the footprint").
   • preserve_stair — user said keep the existing staircase location/configuration.

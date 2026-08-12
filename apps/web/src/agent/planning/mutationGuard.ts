@@ -108,7 +108,13 @@ export function noteDependencyValidationFailure(
   sameKey.suggestedDependentDomain =
     hints.dependentToolDomain ?? sameKey.suggestedDependentDomain;
 
-  if (sameKey.failureCount >= 2) {
+  if (sameKey.suggestedDependentDomain) {
+    state.dependencyDomainsAddressed = state.dependencyDomainsAddressed.filter(
+      (domain) => domain !== sameKey.suggestedDependentDomain,
+    );
+  }
+
+  if (sameKey.failureCount >= 1) {
     sameKey.suppressed = true;
     const dep = hints.dependentToolDomain ?? "blocking";
     sameKey.reason =
@@ -150,5 +156,21 @@ export function noteDependencyInspect(
   toolName: string,
 ): void {
   const domain = DEPENDENCY_INSPECT_TOOLS[toolName];
-  if (domain) noteDependencyDomainAddressed(state, domain);
+  if (!state || !domain) return;
+  if (!state.dependencyDomainsInspected.includes(domain)) {
+    state.dependencyDomainsInspected.push(domain);
+  }
+}
+
+export function activeDependencyBlocks(
+  state: LoopSafetyState | undefined,
+): string[] {
+  if (!state) return [];
+  return Object.values(state.domainRetrySuppressions)
+    .filter((entry) => entry.suppressed)
+    .map(
+      (entry) =>
+        entry.reason ??
+        `${entry.toolDomain} is blocked by ${entry.blockingConstraint} until ${entry.suggestedDependentDomain ?? "the dependent geometry"} is changed.`,
+    );
 }

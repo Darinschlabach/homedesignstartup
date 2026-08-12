@@ -4,7 +4,6 @@ import type { RunContext } from "@openai/agents";
 import { homeDesignAgentDevLog } from "../devLog";
 import type { DesignAgentContext } from "../context/agentContext";
 import {
-  assertLoopNotBlocked,
   guardAgainstIdenticalFailure,
   recordToolFailure,
   recordToolSuccess,
@@ -60,13 +59,11 @@ export const renderPreviewTool = tool({
     });
 
     if (context?.loopSafety) {
-      const blocked =
-        assertLoopNotBlocked(context.loopSafety) ??
-        guardAgainstIdenticalFailure(
-          context.loopSafety,
-          "render_preview",
-          callArgs,
-        );
+      const blocked = guardAgainstIdenticalFailure(
+        context.loopSafety,
+        "render_preview",
+        callArgs,
+      );
       if (blocked) {
         const failure = {
           success: false as const,

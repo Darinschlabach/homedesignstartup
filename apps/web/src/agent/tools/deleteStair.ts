@@ -15,6 +15,7 @@ import {
   stageDesignOperations,
 } from "../operation/agentOperation";
 import { loadAgentModel } from "../project/loadAgentModel";
+import { noteDependencyDomainAddressed } from "../planning/mutationGuard";
 import {
   listStairs,
   scrubNulls,
@@ -128,6 +129,7 @@ export const deleteStairTool = tool({
         : true;
 
       recordToolSuccess(context.loopSafety);
+      noteDependencyDomainAddressed(context.loopSafety, "stairs");
 
       const result = {
         success: true as const,

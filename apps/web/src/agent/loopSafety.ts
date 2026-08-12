@@ -6,7 +6,7 @@
 export const HOME_DESIGN_AGENT_MAX_TURNS = 18;
 
 const MAX_IDENTICAL_FAILURES = 2;
-const MAX_CONSECUTIVE_VALIDATION_FAILURES = 3;
+const MAX_CONSECUTIVE_VALIDATION_FAILURES = 5;
 const MAX_SUCCESSFUL_MODS_PER_OBJECT = 4;
 /** Absolute feet — smaller successful changes are treated as meaningless noise. */
 const MIN_MEANINGFUL_DELTA_FT = 0.05;
@@ -38,6 +38,8 @@ export type LoopSafetyState = {
   domainRetrySuppressions: Record<string, DomainRetrySuppression>;
   /** Domains successfully inspected or mutated after a dependency failure. */
   dependencyDomainsAddressed: string[];
+  /** Read-only investigation performed after a dependency failure. */
+  dependencyDomainsInspected: string[];
 };
 
 export function createLoopSafetyState(): LoopSafetyState {
@@ -50,6 +52,7 @@ export function createLoopSafetyState(): LoopSafetyState {
     replanSuggested: false,
     domainRetrySuppressions: {},
     dependencyDomainsAddressed: [],
+    dependencyDomainsInspected: [],
   };
 }
 
