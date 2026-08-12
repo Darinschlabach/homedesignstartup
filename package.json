@@ -1,0 +1,26 @@
+{
+  "name": "ai-home-design",
+  "private": true,
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "pnpm --filter @aihd/db generate",
+    "db:migrate": "pnpm --filter @aihd/db migrate",
+    "db:studio": "pnpm --filter @aihd/db studio",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\"",
+    "clean": "turbo run clean && rimraf node_modules"
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3",
+    "rimraf": "^6.0.1",
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.2"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@aihd/tailwind-config",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    ".": "./shared.css",
+    "./theme": "./theme.css"
+  }
+}

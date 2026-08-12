@@ -1,0 +1,38 @@
+# dependencies
+node_modules
+.pnpm-store
+
+# builds
+dist
+.next
+.turbo
+out
+build
+
+# env
+.env
+.env.local
+.env.*
+!.env.example
+
+# ide / os
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# test / coverage
+coverage
+playwright-report
+test-results
+
+# local previews / evaluations / agent sessions
+.tmp-*
+
+# misc
+*.log
+*.tsbuildinfo
+.vercel
+supabase/.branches
+supabase/.temp

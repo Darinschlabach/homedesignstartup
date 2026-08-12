@@ -1,0 +1,2 @@
+-- Optional seed for local demos (no auth users; run after creating a user via Studio)
+-- Intentionally empty: profiles/workspaces are created by handle_new_user trigger.

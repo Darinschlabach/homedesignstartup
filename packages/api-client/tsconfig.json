@@ -1,0 +1,9 @@
+{
+  "extends": "@aihd/typescript-config/base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}
