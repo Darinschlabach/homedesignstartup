@@ -13,6 +13,7 @@ import {
   createAgentOperation,
   discardAgentOperation,
 } from "@/agent/operation/agentOperation";
+import { capabilityBoundaryPrompt } from "@/agent/planning/capabilityPolicy";
 import { designRunner } from "@/agent/runner";
 import type { CompletionReport } from "@/agent/planning/taskPlan";
 import { getLatestRevision, parseModel, requireUser } from "@/lib/projects";
@@ -21,9 +22,11 @@ const MAX_COMPLETION_CONTINUATIONS = 2;
 
 function buildContinuationPrompt(
   report: CompletionReport | undefined,
+  originalUserMessage: string,
 ): string {
   const gap = report?.gapSummary;
   return [
+    `Original user request (still authoritative): ${originalUserMessage}`,
     "Continue the same staged design operation — do not restart from scratch.",
     gap?.repairGuidance ??
       "Repair ONLY remaining gaps while preserving completed staged work.",
@@ -226,7 +229,12 @@ export async function POST(request: Request) {
         });
 
         try {
-          let runMessage = message;
+          const boundaryPrompt = context.operation
+            ? capabilityBoundaryPrompt(context.operation.capabilityAssessment)
+            : null;
+          let runMessage = boundaryPrompt
+            ? `${message}\n\n${boundaryPrompt}`
+            : message;
           let result: { finalOutput?: unknown } | null = null;
           let commitResult: Awaited<ReturnType<typeof commitAgentOperation>> | null =
             null;
@@ -283,6 +291,7 @@ export async function POST(request: Request) {
                 "completionReport" in commitResult
                   ? commitResult.completionReport
                   : undefined,
+                context.operation.userMessage,
               );
               homeDesignAgentDevLog("agent_operation_continuation", {
                 runId: operationId,

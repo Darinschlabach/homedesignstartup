@@ -15,7 +15,10 @@ import {
   stageDesignOperations,
 } from "../operation/agentOperation";
 import { loadAgentModel } from "../project/loadAgentModel";
-import { noteDependencyDomainAddressed } from "../planning/mutationGuard";
+import {
+  guardDependencyRepairInspection,
+  noteDependencyDomainAddressed,
+} from "../planning/mutationGuard";
 import {
   listStairs,
   scrubNulls,
@@ -88,6 +91,12 @@ export const modifyStairTool = tool({
       });
       return { success: false as const, ...payload };
     };
+
+    const repairGuard = guardDependencyRepairInspection(
+      context?.loopSafety,
+      "modify_stair",
+    );
+    if (repairGuard) return fail(repairGuard);
 
     try {
       const blocked = assertLoopNotBlocked(context?.loopSafety);

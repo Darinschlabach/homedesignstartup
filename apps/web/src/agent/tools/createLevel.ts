@@ -52,7 +52,7 @@ const createLevelParameters = z
       .enum(["shell"])
       .optional()
       .describe(
-        'Only "shell" is supported (same rectangular BuildingShell footprint). Custom/partial upper footprints are not available.',
+        'create_level initially creates only "shell" stories. After creation, use set_level_footprint to transition that shell-backed upper level to a supported custom/partial axis-aligned rectangle.',
       ),
   })
   .strict();
@@ -63,7 +63,7 @@ export const createLevelTool = tool({
   name: "create_level",
 
   description:
-    "Stage a new shell-backed story with the SAME rectangular BuildingShell footprint. Prefer aboveLevelId so the domain derives elevation. Generates walls/slab for the new level and moves the roof to the top story. Does NOT support partial/setback footprints. Stages only.",
+    "Add a new shell-backed story only when the requested story does not already exist. Prefer aboveLevelId so the domain derives elevation. Generates walls/slab and moves the roof. For an existing story, do not call create_level: use modify_level for height/stacking or set_level_footprint when inspect_level_footprint reports state=shell. A newly created shell story can also transition to a supported partial/setback rectangle with set_level_footprint. Stages only.",
 
   parameters: createLevelParameters,
 
@@ -154,7 +154,7 @@ export const createLevelTool = tool({
           beforeLevels,
           operation: operationMeta(context),
           limitationNote:
-            "Only same-footprint shell stories are supported. Partial/setback second stories are not available.",
+            "create_level only adds shell-backed stories. A shell-backed upper story can subsequently transition to a supported partial/setback axis-aligned rectangle with set_level_footprint.",
         });
       }
 

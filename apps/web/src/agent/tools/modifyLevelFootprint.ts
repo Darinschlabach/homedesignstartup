@@ -26,6 +26,7 @@ import {
   scrubNulls,
   summarizeLevelFootprint,
 } from "./levelFootprintShared";
+import { resolveLevelFootprintUpdate } from "../planning/toolApplicability";
 
 const modifyLevelFootprintParameters = z
   .object({
@@ -46,7 +47,7 @@ export const modifyLevelFootprintTool = tool({
   name: "modify_level_footprint",
 
   description:
-    "Stage updates to an existing custom level footprint (centerX/centerZ/width/depth). Unspecified properties are preserved. Domain regenerates walls/slab and revalidates spaces, openings, stairs, and roof compatibility. Returns structured conflicts. Stages only.",
+    "Update an existing custom level footprint. PRECONDITION: inspect_level_footprint reports state=custom and validTransitions includes modify_level_footprint. For state=shell use set_level_footprint. Unspecified properties are preserved. Domain regenerates walls/slab and revalidates dependencies. Stages only.",
 
   parameters: modifyLevelFootprintParameters,
 
@@ -144,16 +145,24 @@ export const modifyLevelFootprintTool = tool({
           code: "LEVEL_MISSING",
         });
       }
-      if (beforeLevel.footprintSource !== "custom") {
-        return fail({
-          error: `Level ${args.levelId} is not a custom footprint. Use set_level_footprint first.`,
-          code: "LEVEL_FOOTPRINT_NOT_CUSTOM",
+      const applicability = resolveLevelFootprintUpdate(
+        beforeLevel.footprintSource,
+        args,
+      );
+      if (!applicability.applicable) {
+        return {
+          success: false as const,
+          ...applicability,
+          levelId: args.levelId,
+          footprintSource: beforeLevel.footprintSource,
           before: summarizeLevelFootprint(loaded.model, beforeLevel),
-        });
+          replanSuggested: false,
+          nextStep: `Use ${applicability.validTransitions.join(" or ")}.`,
+        };
       }
 
       const before = summarizeLevelFootprint(loaded.model, beforeLevel);
-      const prior = beforeLevel.footprint!;
+      const prior = beforeLevel.footprint;
       const patch: {
         center?: { x: number; y: number };
         width?: number;
@@ -161,20 +170,32 @@ export const modifyLevelFootprintTool = tool({
       } = {};
       if (args.centerX !== undefined || args.centerZ !== undefined) {
         patch.center = {
-          x: args.centerX ?? prior.center.x,
-          y: args.centerZ ?? prior.center.y,
+          x: args.centerX ?? prior!.center.x,
+          y: args.centerZ ?? prior!.center.y,
         };
       }
       if (args.width !== undefined) patch.width = args.width;
       if (args.depth !== undefined) patch.depth = args.depth;
 
-      const operations: DesignOperation[] = [
-        {
-          op: "updateLevelFootprint",
-          levelId: args.levelId,
-          patch,
-        },
-      ];
+      const operations: DesignOperation[] = applicability.transition === "set_level_footprint"
+        ? [{
+            op: "setLevelFootprint",
+            levelId: args.levelId,
+            footprint: {
+              kind: "rect",
+              center: {
+                x: applicability.rectangle.centerX,
+                y: applicability.rectangle.centerZ,
+              },
+              width: applicability.rectangle.width,
+              depth: applicability.rectangle.depth,
+            },
+          }]
+        : [{
+            op: "updateLevelFootprint",
+            levelId: args.levelId,
+            patch,
+          }];
 
       const staged = await stageDesignOperations(
         context,
@@ -211,6 +232,7 @@ export const modifyLevelFootprintTool = tool({
         success: true as const,
         staged: true as const,
         modified: true as const,
+        resolvedTransition: applicability.transition,
         projectId: context.projectId,
         baseRevision: staged.baseRevision,
         levelId: args.levelId,

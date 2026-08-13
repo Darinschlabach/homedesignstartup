@@ -21,6 +21,7 @@ import {
   scrubNulls,
   summarizeLevelFootprint,
 } from "./levelFootprintShared";
+import { checkLevelFootprintTransition } from "../planning/toolApplicability";
 
 const clearLevelFootprintParameters = z
   .object({
@@ -37,7 +38,7 @@ export const clearLevelFootprintTool = tool({
   name: "clear_level_footprint",
 
   description:
-    "Stage clearing a custom level footprint back to footprintSource shell (full BuildingShell rectangle). Domain regenerates full-story exterior walls and slab. Validates the resulting full-footprint state. Does not silently destroy unrelated geometry. Stages only.",
+    "Transition an existing custom level footprint back to shell-backed. PRECONDITION: inspect_level_footprint reports state=custom and validTransitions includes clear_level_footprint. A shell-backed level is already in the target state and should not call this tool. Stages only.",
 
   parameters: clearLevelFootprintParameters,
 
@@ -101,19 +102,21 @@ export const clearLevelFootprintTool = tool({
 
       const before = summarizeLevelFootprint(loaded.model, beforeLevel);
 
-      if (beforeLevel.footprintSource !== "custom") {
+      const applicability = checkLevelFootprintTransition(
+        beforeLevel.footprintSource,
+        "clear_level_footprint",
+      );
+      if (!applicability.applicable) {
         return {
-          success: true as const,
+          success: false as const,
+          ...applicability,
           staged: false as const,
-          cleared: false as const,
-          alreadyShell: true as const,
           projectId: context.projectId,
           levelId: args.levelId,
+          footprintSource: beforeLevel.footprintSource,
           before,
-          after: before,
-          modelSource: loaded.source,
-          dirty: loaded.dirty,
-          nextStep: "Level is already shell-backed; no footprint change staged.",
+          replanSuggested: false,
+          nextStep: `Use ${applicability.validTransitions.join(" or ")}.`,
         };
       }
 

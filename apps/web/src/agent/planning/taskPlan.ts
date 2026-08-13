@@ -4,6 +4,7 @@ export type OutcomeStatus = "pending" | "satisfied" | "blocked";
 
 export type PlanDomain =
   | "levels"
+  | "level_footprint"
   | "spaces"
   | "stairs"
   | "roof"
@@ -50,8 +51,38 @@ export function isContradictoryPreservationOutcome(
   verification: OutcomeVerification,
 ): boolean {
   if (verification.type !== "domain_changed") return false;
-  return /\b(?:unchanged|preserv(?:e|ed|ing)|remain(?:s|ed)?\s+(?:the\s+)?same|do not change|don't change|without changing)\b/i.test(
+  return /\b(?:unchanged|preserv(?:e|ed|ing)|remain(?:s|ed)?\s+(?:the\s+)?same|do not change|don't change|without changing|within\s+(?:the\s+)?(?:existing|current))\b/i.test(
     description,
+  );
+}
+
+export type OutcomeRequirement = "required" | "optional";
+
+/** Classifies outcome modality, independent of any particular design scenario. */
+export function classifyOutcomeRequirement(
+  userMessage: string,
+  description: string,
+  proposed: OutcomeRequirement = "required",
+): OutcomeRequirement {
+  void userMessage;
+  const primaryClause = description.split(/[,;—]/, 1)[0] ?? description;
+  const conditional =
+    /\b(?:if|where|when)\s+(?:needed|necessary|appropriate|helpful|useful|beneficial)\b/i.test(primaryClause) ||
+    /\b(?:as appropriate|consider)\b/i.test(primaryClause) ||
+    /^\s*(?:optionally|potentially|could|may|might)\b/i.test(primaryClause);
+  if (conditional) return "optional";
+
+  const assertivePrimary =
+    /^\s*(?:add|create|provide|change|update|modify|make|ensure|achieve|reduce|increase)\b/i.test(primaryClause) ||
+    /\b(?:is|are|must be|should be)\s+(?:materially\s+)?(?:changed|updated|modified|improved|reduced|increased)\b/i.test(primaryClause);
+  if (assertivePrimary) return "required";
+  return proposed;
+}
+
+export function isPreservationOutcome(description: string): boolean {
+  return (
+    /\b(?:unchanged|preserv(?:e|ed|ing)|maintain|remain(?:s|ed)?\s+(?:the\s+)?same|do not change|don't change|without changing|do not move|don't move|within\s+(?:the\s+)?(?:existing|current))\b/i.test(description) ||
+    /\b(?:keep|retain)\b[^.!?;]{0,80}\b(?:existing|current|same|unchanged|in (?:its|the) (?:place|location))\b/i.test(description)
   );
 }
 
@@ -96,6 +127,7 @@ export type PlannedOutcome = {
   description: string;
   domain: PlanDomain;
   verification: OutcomeVerification;
+  requirement?: OutcomeRequirement;
   status: OutcomeStatus;
   blockedReason?: string;
 };
@@ -142,6 +174,7 @@ export type CompletionReport = {
     id: string;
     description: string;
     domain: PlanDomain;
+    requirement: OutcomeRequirement;
     status: OutcomeStatus;
     satisfied: boolean;
     reason?: string;
@@ -178,6 +211,7 @@ export type CompletionGapSummary = {
 
 const DOMAIN_OPS: Record<PlanDomain, string[]> = {
   levels: ["createLevel", "updateLevel", "deleteLevel", "setLevelFootprint", "updateLevelFootprint", "clearLevelFootprint"],
+  level_footprint: ["setLevelFootprint", "updateLevelFootprint", "clearLevelFootprint"],
   spaces: ["createSpace", "updateSpace", "deleteSpace"],
   stairs: ["createStair", "updateStair", "deleteStair"],
   roof: ["updateRoof", "createRoofMass", "updateRoofMass", "deleteRoofMass", "createRoofPlane"],
@@ -237,6 +271,12 @@ function hasVerticalCirculation(model: BuildingModelV1): boolean {
   );
 }
 
+export function requiresVisualVerification(userMessage: string): boolean {
+  return /\b(?:look|looks|appearance|visual|visually|composition|massing|facade|façade|style|balanced|interesting|appealing|beautiful|plain|top-heavy)\b/i.test(
+    userMessage,
+  );
+}
+
 function hasPartialUpperLevel(model: BuildingModelV1): boolean {
   const shell = model.shell;
   if (!shell || model.levels.length < 2) return false;
@@ -285,6 +325,10 @@ function domainChanged(
   stagedOps: Array<{ op: string }>,
   domain: PlanDomain,
 ): boolean {
+  // "other" is the explicit cross-domain/general bucket. It verifies that the
+  // operation made at least one real model change without inventing a fake
+  // architecture domain for open-ended delegated work.
+  if (domain === "other") return stagedOps.length > 0;
   const allowed = DOMAIN_OPS[domain] ?? [];
   if (allowed.length === 0) return false;
   return stagedOps.some((o) => allowed.includes(o.op));
@@ -571,6 +615,7 @@ export function assessOperationCompletion(options: {
       id: o.id,
       description: o.description,
       domain: o.domain,
+      requirement: o.requirement ?? "required",
       status,
       satisfied: check.satisfied,
       reason: check.reason,
@@ -578,10 +623,11 @@ export function assessOperationCompletion(options: {
     };
   });
 
-  const pendingOutcomeIds = outcomeResults
+  const requiredOutcomeResults = outcomeResults.filter((o) => o.requirement === "required");
+  const pendingOutcomeIds = requiredOutcomeResults
     .filter((o) => !o.satisfied && o.status !== "blocked")
     .map((o) => o.id);
-  const blockedOutcomeIds = outcomeResults
+  const blockedOutcomeIds = requiredOutcomeResults
     .filter((o) => o.status === "blocked")
     .map((o) => o.id);
   const constraintViolations = constraintResults
@@ -600,6 +646,14 @@ export function assessOperationCompletion(options: {
     ),
   );
   missingChecks.push(...(options.blockedDependencies ?? []));
+  if (
+    requiresVisualVerification(options.userMessage) &&
+    options.metrics.renderPreviewSuccessCount === 0
+  ) {
+    missingChecks.push(
+      "Subjective visual/composition objective requires a successful staged render_preview.",
+    );
+  }
 
   const readyToCommit =
     pendingOutcomeIds.length === 0 &&
@@ -640,6 +694,7 @@ export function buildCompletionGapSummary(input: {
   outcomeResults: Array<{
     id: string;
     description: string;
+    requirement: OutcomeRequirement;
     status: OutcomeStatus;
     satisfied: boolean;
     reason?: string;
@@ -649,7 +704,7 @@ export function buildCompletionGapSummary(input: {
   replanReason?: string;
 }): CompletionGapSummary {
   const unsatisfiedOutcomes = input.outcomeResults
-    .filter((o) => !o.satisfied)
+    .filter((o) => o.requirement === "required" && !o.satisfied)
     .map((o) => ({
       id: o.id,
       description: o.description,
@@ -716,6 +771,7 @@ export function summarizePlan(plan: TaskPlan) {
       domain: o.domain,
       verification: o.verification,
       status: o.status,
+      requirement: o.requirement ?? "required",
     })),
     affectedDomains: plan.affectedDomains,
     dependencies: plan.dependencies,

@@ -8,6 +8,7 @@ import {
   listLevels,
   summarizeLevelFootprint,
 } from "./levelFootprintShared";
+import { validLevelFootprintTransitions } from "../planning/toolApplicability";
 
 export const inspectLevelFootprintTool = tool({
   name: "inspect_level_footprint",
@@ -78,6 +79,15 @@ export const inspectLevelFootprintTool = tool({
       coordinateNote:
         "centerX / width along plan X; centerZ / depth along plan depth (domain Vec2.y). Front is typically negative Z.",
       footprint: detail,
+      applicability: {
+        state: level.footprintSource,
+        validTransitions: validLevelFootprintTransitions(level.footprintSource),
+        customAxisAlignedRectangleSupported: !detail.isPrimary,
+        recommendedTransition:
+          level.footprintSource === "shell"
+            ? "set_level_footprint"
+            : "modify_level_footprint",
+      },
       nextStep:
         level.footprintSource === "shell"
           ? "Use set_level_footprint for a custom axis-aligned upper rectangle (cannot customize primary shell footprint by default)."

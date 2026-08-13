@@ -112,6 +112,9 @@ export function noteDependencyValidationFailure(
     state.dependencyDomainsAddressed = state.dependencyDomainsAddressed.filter(
       (domain) => domain !== sameKey.suggestedDependentDomain,
     );
+    state.dependencyDomainsInspected = state.dependencyDomainsInspected.filter(
+      (domain) => domain !== sameKey.suggestedDependentDomain,
+    );
   }
 
   if (sameKey.failureCount >= 1) {
@@ -160,6 +163,26 @@ export function noteDependencyInspect(
   if (!state.dependencyDomainsInspected.includes(domain)) {
     state.dependencyDomainsInspected.push(domain);
   }
+}
+
+/** Require fresh geometric evidence before mutating a blocking dependency. */
+export function guardDependencyRepairInspection(
+  state: LoopSafetyState | undefined,
+  toolName: string,
+): LoopGuardFailure | null {
+  if (!state) return null;
+  const domain = mutationDomainForTool(toolName);
+  const active = Object.values(state.domainRetrySuppressions).find(
+    (entry) => entry.suppressed && entry.suggestedDependentDomain === domain,
+  );
+  if (!active || state.dependencyDomainsInspected.includes(domain)) return null;
+  return {
+    success: false,
+    code: "DEPENDENCY_RETRY_SUPPRESSED",
+    error:
+      `Inspect the blocking ${domain} geometry after the validation failure before changing it. ` +
+      "Use the returned derived bounds, floor opening, and level bounds to choose valid parameters; do not guess.",
+  };
 }
 
 export function activeDependencyBlocks(

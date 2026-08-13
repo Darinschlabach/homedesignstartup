@@ -128,15 +128,15 @@ function firstIndex(tools: ToolCallRecord[], pred: (t: ToolCallRecord) => boolea
   return tools.findIndex(pred);
 }
 
-function textClaimsUnsupported(text: string): boolean {
-  return /not supported|unsupported|cannot|can't|unable|limitation|don't support|do not support|no spiral|can't add a spiral|curved (glass )?wall/i.test(
+export function textClaimsUnsupported(text: string): boolean {
+  return /not supported|isn['’]t supported|aren['’]t supported|unsupported|cannot|can['’]t|unable|limitation|don['’]t support|do not support|no spiral|not a spiral|not a .*curved/i.test(
     text,
   );
 }
 
-function textClaimsSpiralOrCurve(text: string): boolean {
+export function textClaimsSpiralOrCurve(text: string): boolean {
   const lower = text.toLowerCase();
-  if (/can't|cannot|unable|not supported|don't support|do not support|won't support/.test(lower)) {
+  if (/can['’]t|cannot|unable|not supported|isn['’]t supported|aren['’]t supported|don['’]t support|do not support|won['’]t support|but not a spiral|not a .*curved/.test(lower)) {
     return false;
   }
   return /added (a )?spiral|created (a )?spiral|installed (a )?spiral|built (a )?spiral|curved glass wall|added a curved/i.test(
@@ -458,7 +458,9 @@ export function scoreScenario(options: {
   const claimedUnsupported = textClaimsUnsupported(finalText);
   const fakedUnsupported =
     scenario.id === 9 &&
-    (textClaimsSpiralOrCurve(finalText) || after.stairs.some((s) => /spiral/i.test(s.type)));
+    (after.stairs.some((s) => /spiral/i.test(s.type)) ||
+      successfulMutations.some((t) => /stair|wall/i.test(t.name)) ||
+      (textClaimsSpiralOrCurve(finalText) && !claimedUnsupported));
 
   const violations = constraintViolations(scenario, diff, after);
   const geometryValid = after.geometryValid;

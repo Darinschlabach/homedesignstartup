@@ -11,12 +11,38 @@ import { mergeTaskPlanRevision } from "./planRevision";
 import { deriveDependencyHints } from "./validationHints";
 import {
   classifyConstraintIntent,
+  classifyOutcomeRequirement,
   isContradictoryPreservationOutcome,
+  isPreservationOutcome,
+  assessOperationCompletion,
+  requiresVisualVerification,
   type TaskPlan,
   verifyOutcome,
 } from "./taskPlan";
 
 describe("planning and recovery invariants", () => {
+  it("allows a general cross-domain outcome to be satisfied by real staged work", () => {
+    const result = verifyOutcome(
+      {
+        id: "general-improvement",
+        description: "Make one or more supported design improvements",
+        domain: "other",
+        verification: { type: "domain_changed", domain: "other" },
+        status: "pending",
+      },
+      {} as Parameters<typeof verifyOutcome>[1],
+      [{ op: "updateRoof" }],
+      {
+        renderPreviewSuccessCount: 0,
+        inspectProjectCount: 0,
+        progressCheckCount: 0,
+        validationFailureCount: 0,
+        lastValidationCodes: [],
+      },
+    );
+    expect(result.satisfied).toBe(true);
+  });
+
   it("does not convert a subjective visual objective into geometry_unchanged", () => {
     expect(
       classifyConstraintIntent(
@@ -88,6 +114,42 @@ describe("planning and recovery invariants", () => {
     expect(result.plan.requiredOutcomes[1]?.id).toBe("visual");
     expect(result.notes.join(" ")).toContain("Ignored attempted rewrite");
     expect(result.notes.join(" ")).toContain("not omitted silently");
+  });
+
+  it("merges a repaired equivalent outcome instead of retaining a stale blocked duplicate", () => {
+    const existing: TaskPlan = {
+      objective: "Improve upper massing",
+      constraints: [],
+      requiredOutcomes: [{
+        id: "upper-original",
+        description: "Adjust the second-story composition",
+        domain: "level_footprint",
+        verification: { type: "visual_verified" },
+        status: "blocked",
+        blockedReason: "Stair blocked the first attempt",
+      }],
+      affectedDomains: ["level_footprint"],
+      dependencies: [],
+      completionChecks: [],
+      planningRequired: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const result = mergeTaskPlanRevision(existing, {
+      ...existing,
+      requiredOutcomes: [{
+        id: "upper-repaired",
+        description: "Adjust the second-story composition",
+        domain: "level_footprint",
+        verification: { type: "domain_changed", domain: "level_footprint" },
+        status: "satisfied",
+      }],
+    });
+    expect(result.plan.requiredOutcomes).toHaveLength(1);
+    expect(result.plan.requiredOutcomes[0]).toMatchObject({
+      id: "upper-original",
+      status: "satisfied",
+    });
+    expect(result.plan.requiredOutcomes[0]?.blockedReason).toBeUndefined();
   });
 
   it("suppresses retries until the blocking dependency is changed, not merely inspected", () => {
@@ -233,5 +295,140 @@ describe("planning and recovery invariants", () => {
         domain: "footprint",
       }),
     ).toBe(false);
+  });
+
+  it("makes conditional design opportunities optional and non-blocking", () => {
+    expect(
+      classifyOutcomeRequirement(
+        "Improve the facade however you think best.",
+        "Adjust front openings if needed to improve composition.",
+      ),
+    ).toBe("optional");
+    expect(
+      classifyOutcomeRequirement(
+        "Make the second-story composition more interesting.",
+        "Update the second-story composition, potentially using a setback.",
+      ),
+    ).toBe("required");
+    expect(
+      classifyOutcomeRequirement(
+        "Make the roof and second story more interesting.",
+        "Second-story composition is materially changed, potentially using a setback.",
+        "optional",
+      ),
+    ).toBe("required");
+
+    const report = assessOperationCompletion({
+      userMessage: "Coordinate an exterior improvement while preserving the footprint.",
+      plan: {
+        objective: "Improve exterior",
+        constraints: [],
+        requiredOutcomes: [{
+          id: "roof",
+          description: "Improve roof",
+          domain: "roof",
+          verification: { type: "domain_changed", domain: "roof" },
+          requirement: "required",
+          status: "pending",
+        }, {
+          id: "openings",
+          description: "Consider openings if helpful",
+          domain: "openings",
+          verification: { type: "domain_changed", domain: "openings" },
+          requirement: "optional",
+          status: "pending",
+        }],
+        affectedDomains: ["roof", "openings"],
+        dependencies: [],
+        completionChecks: ["Review result"],
+        planningRequired: true,
+        updatedAt: new Date().toISOString(),
+      },
+      baseModel: { levels: [] } as never,
+      workingModel: { levels: [] } as never,
+      stagedOps: [{ op: "updateRoof" }],
+      metrics: {
+        renderPreviewSuccessCount: 0,
+        inspectProjectCount: 0,
+        progressCheckCount: 1,
+        validationFailureCount: 0,
+        lastValidationCodes: [],
+      },
+    });
+    expect(report.readyToCommit).toBe(true);
+    expect(report.pendingOutcomeIds).toEqual([]);
+    expect(report.outcomes.find((o) => o.id === "openings")?.satisfied).toBe(false);
+  });
+
+  it("requires a preview for subjective visual objectives", () => {
+    expect(requiresVisualVerification("Make the massing more interesting.")).toBe(true);
+    const report = assessOperationCompletion({
+      userMessage: "Make the roof composition more interesting.",
+      plan: {
+        objective: "Improve roof composition",
+        constraints: [],
+        requiredOutcomes: [{
+          id: "roof",
+          description: "Change roof",
+          domain: "roof",
+          verification: { type: "domain_changed", domain: "roof" },
+          requirement: "required",
+          status: "pending",
+        }],
+        affectedDomains: ["roof"],
+        dependencies: [],
+        completionChecks: ["Review"],
+        planningRequired: true,
+        updatedAt: new Date().toISOString(),
+      },
+      baseModel: { levels: [] } as never,
+      workingModel: { levels: [] } as never,
+      stagedOps: [{ op: "updateRoof" }],
+      metrics: {
+        renderPreviewSuccessCount: 0,
+        inspectProjectCount: 0,
+        progressCheckCount: 1,
+        validationFailureCount: 0,
+        lastValidationCodes: [],
+      },
+    });
+    expect(report.readyToCommit).toBe(false);
+    expect(report.missingChecks.join(" ")).toContain("render_preview");
+  });
+
+  it("recognizes preservation text as constraint-only and separates level footprints", () => {
+    expect(isPreservationOutcome("Keep the front door unchanged.")).toBe(true);
+    expect(
+      isPreservationOutcome("Apply facade changes within the existing footprint."),
+    ).toBe(true);
+    expect(
+      isContradictoryPreservationOutcome(
+        "Apply facade changes within the existing footprint.",
+        { type: "domain_changed", domain: "footprint" },
+      ),
+    ).toBe(true);
+    const metrics = {
+      renderPreviewSuccessCount: 0,
+      inspectProjectCount: 0,
+      progressCheckCount: 0,
+      validationFailureCount: 0,
+      lastValidationCodes: [],
+    };
+    expect(verifyOutcome({
+      id: "l2",
+      description: "Change upper footprint",
+      domain: "level_footprint",
+      verification: { type: "domain_changed", domain: "level_footprint" },
+      requirement: "required",
+      status: "pending",
+    }, {} as never, [{ op: "setLevelFootprint" }], metrics)).toEqual({ satisfied: true });
+    expect(verifyOutcome({
+      id: "shell",
+      description: "Change primary footprint",
+      domain: "footprint",
+      verification: { type: "domain_changed", domain: "footprint" },
+      requirement: "required",
+      status: "pending",
+    }, {} as never, [{ op: "setLevelFootprint" }], metrics)).toMatchObject({ satisfied: false });
   });
 });

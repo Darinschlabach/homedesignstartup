@@ -222,47 +222,139 @@ function parseRetryAfterMs(text: string): number | null {
   return null;
 }
 
-async function callAgent(cookie: { name: string; value: string }, message: string) {
+function parseRetryAfterHeaderMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
+}
+
+function backoffWithJitter(attempt: number): number {
+  const exponential = RATE_LIMIT_BASE_MS * Math.pow(2, attempt);
+  return Math.ceil(exponential * (0.75 + Math.random() * 0.5));
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current === "object") {
+      const record = current as { name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+      const text = `${record.name ?? ""} ${record.message ?? ""} ${record.code ?? ""}`;
+      if (/ECONNRESET|ETIMEDOUT|EPIPE|UND_ERR_SOCKET|fetch failed|network|terminated/i.test(text)) {
+        return true;
+      }
+      current = record.cause;
+      continue;
+    }
+    if (/ECONNRESET|ETIMEDOUT|EPIPE|UND_ERR_SOCKET|fetch failed|network|terminated/i.test(String(current))) {
+      return true;
+    }
+    break;
+  }
+  return false;
+}
+
+async function callAgent(
+  admin: SupabaseClient,
+  baseRevision: number,
+  cookie: { name: string; value: string },
+  message: string,
+) {
   let last: { status: number; text: string; sse: ParsedSse } = {
     status: 0,
     text: "",
     sse: parseSse(""),
   };
+  let networkRetryCount = 0;
+  let rateLimitRetryCount = 0;
 
   for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt += 1) {
-    const res = await fetch(AGENT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Cookie: `${cookie.name}=${cookie.value}`,
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify({ projectId: PROJECT_ID, message }),
-    });
-    const text = await res.text();
-    const sse = parseSse(text);
-    last = { status: res.status, text, sse };
+    let res: Response;
+    try {
+      res = await fetch(AGENT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `${cookie.name}=${cookie.value}`,
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({ projectId: PROJECT_ID, message }),
+      });
+      const text = await res.text();
+      const sse = parseSse(text);
+      last = { status: res.status, text, sse };
+    } catch (error) {
+      if (!isTransientNetworkError(error)) {
+        throw error;
+      }
+      if (attempt >= RATE_LIMIT_MAX_RETRIES) {
+        return {
+          ...last,
+          rateLimitFailure: false,
+          networkRetryCount,
+          rateLimitRetryCount,
+          networkFailure: true,
+          ambiguousCommittedResponse: false,
+        };
+      }
+      const latest = await latestRevision(admin);
+      if (latest.revision !== baseRevision) {
+        return {
+          ...last,
+          rateLimitFailure: false,
+          networkRetryCount,
+          rateLimitRetryCount,
+          networkFailure: false,
+          ambiguousCommittedResponse: true,
+        };
+      }
+      networkRetryCount += 1;
+      const waitMs = backoffWithJitter(attempt);
+      console.warn(`Network retry ${networkRetryCount} after transient failure — waiting ${waitMs}ms`);
+      await sleep(waitMs);
+      continue;
+    }
 
     const rateLimited =
       res.status === 429 ||
-      isRateLimitError(sse.errorText) ||
-      isRateLimitError(text);
+      isRateLimitError(last.sse.errorText) ||
+      isRateLimitError(last.text);
 
     if (!rateLimited) {
-      return { ...last, rateLimitFailure: false };
+      return {
+        ...last,
+        rateLimitFailure: false,
+        networkRetryCount,
+        rateLimitRetryCount,
+        networkFailure: false,
+        ambiguousCommittedResponse: false,
+      };
     }
     if (attempt >= RATE_LIMIT_MAX_RETRIES) break;
 
+    rateLimitRetryCount += 1;
     const retryAfter =
-      parseRetryAfterMs(text) ?? parseRetryAfterMs(sse.errorText);
-    const waitMs = retryAfter ?? RATE_LIMIT_BASE_MS * Math.pow(2, attempt);
+      parseRetryAfterHeaderMs(res.headers.get("retry-after")) ??
+      parseRetryAfterMs(last.text) ??
+      parseRetryAfterMs(last.sse.errorText);
+    const waitMs = retryAfter ?? backoffWithJitter(attempt);
     console.warn(
       `Rate limit (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES + 1}) — waiting ${waitMs}ms`,
     );
     await sleep(waitMs);
   }
 
-  return { ...last, rateLimitFailure: true };
+  return {
+    ...last,
+    rateLimitFailure: true,
+    networkRetryCount,
+    rateLimitRetryCount,
+    networkFailure: false,
+    ambiguousCommittedResponse: false,
+  };
 }
 
 async function restoreViaApi(cookie: { name: string; value: string }, fromRevision: number) {
@@ -332,6 +424,10 @@ type ScenarioReport = {
     incompleteDiscarded: boolean;
     completionReport: unknown;
     rateLimitFailure: boolean;
+    networkRetryCount: number;
+    rateLimitRetryCount: number;
+    ambiguousCommittedResponse: boolean;
+    networkFailure: boolean;
   };
   restore?: { status: number; revisionAfterRestore: number };
 };
@@ -347,7 +443,15 @@ async function runScenario(
   const before = snapModel(seeded.model);
   console.log("base revision", seeded.revision, "fixture", scenario.fixture);
 
-  const { status, sse, rateLimitFailure } = await callAgent(cookie, scenario.message);
+  const {
+    status,
+    sse,
+    rateLimitFailure,
+    networkRetryCount,
+    rateLimitRetryCount,
+    ambiguousCommittedResponse,
+    networkFailure,
+  } = await callAgent(admin, seeded.revision, cookie, scenario.message);
   const afterRow = await latestRevision(admin);
   const after = snapModel(BuildingModelV1Schema.parse(afterRow.model));
   const diff = diffSnaps(before, after);
@@ -418,6 +522,10 @@ async function runScenario(
         Boolean(sse.errorText && /materially incomplete/i.test(sse.errorText)),
       completionReport: sse.commit?.completionReport ?? null,
       rateLimitFailure,
+      networkRetryCount,
+      rateLimitRetryCount,
+      ambiguousCommittedResponse,
+      networkFailure,
     },
   };
 

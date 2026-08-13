@@ -7,7 +7,9 @@ import { mergeTaskPlanRevision } from "../planning/planRevision";
 import {
   suggestsStructuredPlanning,
   classifyConstraintIntent,
+  classifyOutcomeRequirement,
   isContradictoryPreservationOutcome,
+  isPreservationOutcome,
   summarizePlan,
   type ConstraintKind,
   type OutcomeVerification,
@@ -33,6 +35,7 @@ const constraintKindSchema = z.enum([
 
 const planDomainSchema = z.enum([
   "levels",
+  "level_footprint",
   "spaces",
   "stairs",
   "roof",
@@ -92,11 +95,17 @@ const setTaskPlanParameters = z
             id: z.string().min(1),
             description: z.string().min(1),
             domain: planDomainSchema,
+            requirement: z
+              .enum(["required", "optional"])
+              .default("required")
+              .describe(
+                "required only for explicit user requirements; optional for conditional or agent-generated design opportunities and never commit-blocking.",
+              ),
             verification: verificationSchema.describe(
               "Use vertical_circulation when multi-level access is required. " +
                 "Use visual_verified or manual for subjective design goals (balanced massing, not top-heavy, more interesting exterior). " +
                 "Use partial_upper_level when the user requires a partial, reduced, or setback upper story; min_level_count alone does not verify that geometry. " +
-                "Use domain_changed when a domain must be materially edited.",
+                "Use domain_changed when a domain must be materially edited. Use level_footprint for per-story custom/setback footprints; footprint means only the primary BuildingShell.",
             ),
           })
           .strict(),
@@ -159,6 +168,7 @@ export const setTaskPlanTool = tool({
     CONSTRAINT_KIND_GUIDANCE +
     " When a plan already exists, calling this tool MERGES into the existing plan: original objective, constraints, and required outcomes are preserved unless explicitly superseded. " +
     "Never silently drop vertical_circulation or other required outcomes on replan. " +
+    "Do not create outcomes for preservation constraints. Mark conditional or agent-generated opportunities optional. " +
     "For trivial single-domain edits, skip this tool. After major edits, use check_operation_progress before finishing.",
 
   parameters: setTaskPlanParameters,
@@ -188,6 +198,7 @@ export const setTaskPlanTool = tool({
     const incomingOutcomes: PlannedOutcome[] = args.requiredOutcomes.flatMap(
       (o): PlannedOutcome[] => {
         if (
+          isPreservationOutcome(o.description) ||
           isContradictoryPreservationOutcome(
             o.description,
             o.verification as OutcomeVerification,
@@ -196,7 +207,7 @@ export const setTaskPlanTool = tool({
           rejectedOutcomes.push({
             id: o.id,
             reason:
-              "A preservation requirement cannot be verified by changing that domain; represent it as a deterministic constraint instead.",
+              "A preservation requirement is verified by a deterministic constraint, not by a mutation outcome.",
           });
           return [];
         }
@@ -205,6 +216,11 @@ export const setTaskPlanTool = tool({
           description: o.description,
           domain: o.domain as PlanDomain,
           verification: o.verification as OutcomeVerification,
+          requirement: classifyOutcomeRequirement(
+            op.userMessage,
+            o.description,
+            o.requirement,
+          ),
           status: "pending",
         }];
       },

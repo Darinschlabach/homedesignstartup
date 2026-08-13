@@ -108,7 +108,7 @@ export const inspectLevelTool = tool({
       nextStep:
         levels.length === 1
           ? "Single-story building. Use create_level with footprintSource shell (same footprint) to add another story."
-          : "Inspect a specific levelId before modifying story height/elevation.",
+          : "The building already has multiple stories. Do not call create_level to alter an existing story. Inspect that levelId; use modify_level for height/stacking or inspect_level_footprint and its machine-readable validTransitions for partial/setback composition.",
     };
     homeDesignAgentDevLog("inspect_level_execute_end", {
       tool: "inspect_level",

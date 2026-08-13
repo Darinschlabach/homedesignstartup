@@ -26,6 +26,7 @@ import {
   scrubNulls,
   summarizeLevelFootprint,
 } from "./levelFootprintShared";
+import { checkLevelFootprintTransition } from "../planning/toolApplicability";
 
 const setLevelFootprintParameters = z
   .object({
@@ -55,7 +56,7 @@ export const setLevelFootprintTool = tool({
   name: "set_level_footprint",
 
   description:
-    "Stage a custom axis-aligned rectangular footprint for an upper level (footprintSource custom). Domain regenerates that level's exterior walls and slab; roof bearing follows the top footprint. Does not invent lower roofs for exposed Level-1 regions — EXPOSED_LOWER_ROOF warnings are returned. Does not support rotation or freeform polygons. Stages only.",
+    "Transition a shell-backed upper level to a custom axis-aligned rectangular footprint. PRECONDITION: inspect_level_footprint reports state=shell and validTransitions includes set_level_footprint. For state=custom use modify_level_footprint. Domain regenerates that level's exterior walls and slab. Rotation and freeform polygons are unsupported. Stages only.",
 
   parameters: setLevelFootprintParameters,
 
@@ -145,6 +146,21 @@ export const setLevelFootprintTool = tool({
             footprintSource: l.footprintSource,
           })),
         });
+      }
+
+      const applicability = checkLevelFootprintTransition(
+        beforeLevel.footprintSource,
+        "set_level_footprint",
+      );
+      if (!applicability.applicable) {
+        return {
+          success: false as const,
+          ...applicability,
+          levelId: args.levelId,
+          footprintSource: beforeLevel.footprintSource,
+          replanSuggested: false,
+          nextStep: `Use ${applicability.validTransitions.join(" or ")}.`,
+        };
       }
 
       const before = summarizeLevelFootprint(loaded.model, beforeLevel);

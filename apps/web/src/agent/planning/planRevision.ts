@@ -45,6 +45,10 @@ function outcomeRequirementKey(outcome: PlannedOutcome): string {
   return `${outcome.domain}:${JSON.stringify(outcome.verification)}`;
 }
 
+function normalizedOutcomeDescription(description: string): string {
+  return description.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
 /**
  * Merge a revised plan into an existing one. Preserves objective, constraints, and
  * required outcomes unless explicitly superseded with a reason.
@@ -106,12 +110,62 @@ export function mergeTaskPlanRevision(
           `Ignored attempted rewrite of required outcome ${outcome.id}; existing requirement and verification were preserved. Add a new outcome id for an additional requirement.`,
         );
       }
+      if (!changedRequirement && outcome.status === "satisfied" && prev.status !== "satisfied") {
+        outcomeById.set(prev.id, {
+          ...prev,
+          status: "satisfied",
+          blockedReason: undefined,
+        });
+        notes.push(`Updated existing outcome ${prev.id} to satisfied.`);
+      } else if (!changedRequirement && prev.status === "blocked" && outcome.status === "pending") {
+        outcomeById.set(prev.id, {
+          ...prev,
+          status: "pending",
+          blockedReason: undefined,
+        });
+        notes.push(`Reopened blocked outcome ${prev.id} after an explicit repair replan.`);
+      }
       continue;
     }
     const semanticMatch = [...outcomeById.values()].find(
-      (candidate) => outcomeRequirementKey(candidate) === outcomeRequirementKey(outcome),
+      (candidate) =>
+        outcomeRequirementKey(candidate) === outcomeRequirementKey(outcome) ||
+        normalizedOutcomeDescription(candidate.description) ===
+          normalizedOutcomeDescription(outcome.description),
     );
     if (semanticMatch) {
+      if (outcome.status === "satisfied" && semanticMatch.status !== "satisfied") {
+        outcomeById.set(semanticMatch.id, {
+          ...semanticMatch,
+          status: "satisfied",
+          blockedReason: undefined,
+        });
+        notes.push(
+          `Updated existing outcome ${semanticMatch.id} to satisfied from equivalent revised outcome ${outcome.id}.`,
+        );
+      } else if (semanticMatch.status === "blocked" && outcome.status === "pending") {
+        outcomeById.set(semanticMatch.id, {
+          ...semanticMatch,
+          status: "pending",
+          blockedReason: undefined,
+        });
+        notes.push(
+          `Reopened blocked outcome ${semanticMatch.id} from equivalent repair outcome ${outcome.id}.`,
+        );
+      }
+      if (
+        semanticMatch.requirement === "optional" &&
+        (outcome.requirement ?? "required") === "required"
+      ) {
+        outcomeById.set(semanticMatch.id, {
+          ...semanticMatch,
+          requirement: "required",
+        });
+        notes.push(
+          `Promoted existing optional outcome ${semanticMatch.id} to required because the revised plan identified it as an explicit requirement.`,
+        );
+        continue;
+      }
       notes.push(
         `Merged duplicate outcome ${outcome.id} into existing requirement ${semanticMatch.id}.`,
       );
@@ -199,6 +253,12 @@ export function mergeTaskPlanRevision(
     planningRequired: existing.planningRequired || incoming.planningRequired,
     updatedAt: new Date().toISOString(),
   };
+
+  if (addedOutcomeIds.length === 0 && addedConstraintIds.length === 0) {
+    notes.push(
+      "No new semantic requirements were added. Continue only unresolved required outcomes; do not repeat inspection, replanning, or progress checks for already-satisfied work.",
+    );
+  }
 
   return {
     plan,

@@ -20,6 +20,11 @@ import {
 } from "../planning/taskPlan";
 import { activeDependencyBlocks } from "../planning/mutationGuard";
 import { noteValidationFailure } from "../loopSafety";
+import {
+  assessCapabilityRequest,
+  blockedCapabilityForOperations,
+  type CapabilityAssessment,
+} from "../planning/capabilityPolicy";
 
 /** Serialize mutating stages so parallel tool calls cannot interleave writes. */
 class AsyncMutex {
@@ -74,6 +79,7 @@ export type AgentOperationState = {
   runMetrics: OperationRunMetrics;
   /** Set when check_operation_progress confirms readiness. */
   progressAcknowledged: boolean;
+  capabilityAssessment: CapabilityAssessment;
 };
 
 export function createAgentOperation(options: {
@@ -85,6 +91,27 @@ export function createAgentOperation(options: {
   baseRevisionId: string;
   baseModel: BuildingModelV1;
 }): AgentOperationState {
+  const capabilityAssessment = assessCapabilityRequest(options.userMessage);
+  const capabilityPlan = capabilityAssessment.blocked.length
+    ? {
+        objective: options.userMessage,
+        constraints: [],
+        requiredOutcomes: capabilityAssessment.blocked.map((item, index) => ({
+          id: `unsupported-${item.domain}-${index + 1}`,
+          description: `Provide requested ${item.requested}`,
+          domain: item.domain,
+          verification: { type: "manual" as const },
+          requirement: "required" as const,
+          status: "blocked" as const,
+          blockedReason: `UNSUPPORTED_CAPABILITY: ${item.requested}. Supported alternatives: ${item.supportedAlternatives.join(", ")}.`,
+        })),
+        affectedDomains: [...new Set(capabilityAssessment.blocked.map((item) => item.domain))],
+        dependencies: [],
+        completionChecks: ["No unsupported geometry mutation is staged."],
+        planningRequired: true,
+        updatedAt: new Date().toISOString(),
+      }
+    : null;
   return {
     operationId: options.operationId,
     projectId: options.projectId,
@@ -100,7 +127,7 @@ export function createAgentOperation(options: {
     committed: false,
     discarded: false,
     mutationMutex: new AsyncMutex(),
-    taskPlan: null,
+    taskPlan: capabilityPlan,
     runMetrics: {
       renderPreviewSuccessCount: 0,
       inspectProjectCount: 0,
@@ -109,6 +136,7 @@ export function createAgentOperation(options: {
       lastValidationCodes: [],
     },
     progressAcknowledged: false,
+    capabilityAssessment,
   };
 }
 
@@ -182,6 +210,19 @@ export async function stageDesignOperations(
       success: false,
       error: "No design operations to stage.",
       code: "NO_OPERATIONS",
+      baseRevision: op.baseRevision,
+    };
+  }
+
+  const blockedCapability = blockedCapabilityForOperations(
+    op.capabilityAssessment,
+    operations,
+  );
+  if (blockedCapability) {
+    return {
+      success: false,
+      error: `${blockedCapability.requested} is not supported. Supported alternatives: ${blockedCapability.supportedAlternatives.join(", ")}. Approximation requires explicit user authorization.`,
+      code: "UNSUPPORTED_CAPABILITY",
       baseRevision: op.baseRevision,
     };
   }
@@ -322,7 +363,10 @@ export async function commitAgentOperation(
       baseRevision: op.baseRevision,
     };
   }
-  if (!op.dirty || op.stagedOperations.length === 0) {
+  if (
+    (!op.dirty || op.stagedOperations.length === 0) &&
+    op.capabilityAssessment.blocked.length > 0
+  ) {
     return {
       success: true,
       skipped: true,
@@ -332,7 +376,7 @@ export async function commitAgentOperation(
   }
 
   return op.mutationMutex.run(async () => {
-    if (op.committed || op.discarded || !op.dirty) {
+    if (op.committed || op.discarded) {
       return {
         success: true as const,
         skipped: true as const,
@@ -407,6 +451,15 @@ export async function commitAgentOperation(
         code: "INCOMPLETE_OPERATION",
         completionReport,
         gapSummary: gap ?? null,
+        baseRevision: op.baseRevision,
+      };
+    }
+
+    if (!op.dirty || op.stagedOperations.length === 0) {
+      return {
+        success: true as const,
+        skipped: true as const,
+        reason: "no_changes" as const,
         baseRevision: op.baseRevision,
       };
     }
