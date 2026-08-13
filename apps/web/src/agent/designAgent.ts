@@ -40,6 +40,7 @@ import { setLevelFootprintTool } from "./tools/setLevelFootprint";
 import { modifyLevelFootprintTool } from "./tools/modifyLevelFootprint";
 import { clearLevelFootprintTool } from "./tools/clearLevelFootprint";
 import { inspectStairTool } from "./tools/inspectStair";
+import { findStairPlacementsTool } from "./tools/findStairPlacements";
 import { createStairTool } from "./tools/createStair";
 import { modifyStairTool } from "./tools/modifyStair";
 import { deleteStairTool } from "./tools/deleteStair";
@@ -95,8 +96,9 @@ STRUCTURED PLANNING (coordinated requests only):
 - When the user explicitly delegates design judgment (for example, asks you to improve whatever needs work), that is authorization to choose and stage safe supported improvements. Do not block the required improvement merely because no preferences were supplied, and do not stop to ask permission after inspection. Make restrained architectural choices, stage them, visually verify them, and let the completion gate enforce the plan.
 
 READ-ONLY tools:
-- inspect_project, inspect_object, inspect_wall, inspect_footprint, inspect_roof, inspect_roof_mass, inspect_exposed_roof_regions, inspect_level, inspect_level_footprint, inspect_stair, inspect_materials, find_material, get_measurements
+- inspect_project, inspect_object, inspect_wall, inspect_footprint, inspect_roof, inspect_roof_mass, inspect_exposed_roof_regions, inspect_level, inspect_level_footprint, inspect_stair, find_stair_placements, inspect_materials, find_material, get_measurements
 - check_operation_progress: completion verification against the task plan and staged state (call before finishing coordinated requests)
+- find_stair_placements: deterministic read-only search for valid straight/L-shaped stair configurations inside a proposed upper footprint; returns exact candidates or NO_VALID_STAIR_PLACEMENT and never stages a choice
 - render_preview: image of staged state when dirty, otherwise the base committed revision. Check modelSource metadata (staged vs committed).
 
 PLANNING tools:
@@ -149,6 +151,7 @@ STAIRS / VERTICAL CIRCULATION (highly visual):
 - Inspect levels and available clear floor area (inspect_level, get_measurements, inspect_project) before placing a stair.
 - YOU choose architectural placement/configuration (type straight|lShape, origin, direction, width, availableRun, L-turn/landing). The geometry engine derives riser count/height, tread count/depth, landing elevation, floor opening, and tread/riser meshes — NEVER invent tread-by-tread geometry or manually calculate code math.
 - When a level-footprint mutation reports a stair dependency, inspect_stair and inspect_level_footprint first. Base the repair on the returned derived bounds, floor-opening polygon, riser/tread requirements, and target footprint bounds. Do not guess new stair parameters or retry the footprint until the inspected geometry demonstrates the stair/opening fits.
+- When a stair blocks a coordinated level-footprint mutation, call find_stair_placements with the exact proposed footprint and replacingStairId. Choose among returned candidates using the larger design goals, then use its exact parameters. If it returns NO_VALID_STAIR_PLACEMENT, stop safely or revise the proposed footprint—never continue stochastic coordinate guesses.
 - Supported types only: straight and lShape. U-shaped, spiral, curved, and winder stairs are NOT supported. If asked for those, refuse clearly — do NOT approximate with straight/L unless the user explicitly agrees to a different supported type.
 - No preset stair packages tied to house styles (no "modern stair" / "farmhouse stair" templates).
 - If a straight stair cannot fit the available run/clearance, consider an L-shaped stair (or adjust placement/width/run) — or report that a safe stair cannot be found. Do not fake unsafe geometry.
@@ -246,6 +249,7 @@ Keep final answers concise: what you changed and why. Do not expose chain-of-tho
     modifyLevelFootprintTool,
     clearLevelFootprintTool,
     inspectStairTool,
+    findStairPlacementsTool,
     createStairTool,
     modifyStairTool,
     deleteStairTool,

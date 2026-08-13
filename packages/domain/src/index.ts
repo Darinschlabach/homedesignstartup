@@ -22,6 +22,7 @@ export * from './level-footprint-ops';
 export * from './lower-roof';
 export * from './stair';
 export * from './stair-ops';
+export * from './stair-fit';
 export {
   buildCrossGableAssembly,
   buildCrossGableAssemblyClipped,
