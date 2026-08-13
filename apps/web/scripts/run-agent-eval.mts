@@ -44,6 +44,10 @@ const AGENT_URL = process.env.AGENT_EVAL_URL ?? "http://localhost:3000/api/desig
 const SCENARIO_DELAY_MS = Number(process.env.AGENT_EVAL_DELAY_MS ?? "8000");
 const RATE_LIMIT_MAX_RETRIES = Number(process.env.AGENT_EVAL_MAX_RETRIES ?? "4");
 const RATE_LIMIT_BASE_MS = Number(process.env.AGENT_EVAL_BACKOFF_MS ?? "5000");
+const MAX_BACKOFF_MS = Number(process.env.AGENT_EVAL_MAX_BACKOFF_MS ?? "60000");
+const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_EVAL_REQUEST_TIMEOUT_MS ?? "330000");
+const SSE_IDLE_TIMEOUT_MS = Number(process.env.AGENT_EVAL_SSE_IDLE_TIMEOUT_MS ?? "45000");
+const SERVER_HEALTH_TIMEOUT_MS = Number(process.env.AGENT_EVAL_HEALTH_TIMEOUT_MS ?? "5000");
 
 const argv = process.argv.slice(2);
 const noRestore = argv.includes("--no-restore");
@@ -232,7 +236,114 @@ function parseRetryAfterHeaderMs(value: string | null): number | null {
 
 function backoffWithJitter(attempt: number): number {
   const exponential = RATE_LIMIT_BASE_MS * Math.pow(2, attempt);
-  return Math.ceil(exponential * (0.75 + Math.random() * 0.5));
+  return Math.min(
+    MAX_BACKOFF_MS,
+    Math.ceil(exponential * (0.75 + Math.random() * 0.5)),
+  );
+}
+
+type TransportFailure =
+  | "SERVER_UNAVAILABLE"
+  | "ECONNRESET"
+  | "FETCH_TIMEOUT"
+  | "SSE_IDLE_TIMEOUT"
+  | "SSE_CLOSED_WITHOUT_DONE"
+  | "NETWORK_ERROR";
+
+class EvalTransportError extends Error {
+  constructor(
+    message: string,
+    readonly code: TransportFailure,
+    readonly receivedBytes = 0,
+  ) {
+    super(message);
+  }
+}
+
+function classifyTransportError(error: unknown): TransportFailure {
+  const text = String(
+    error instanceof Error
+      ? `${error.name} ${error.message} ${(error as { cause?: unknown }).cause ?? ""}`
+      : error,
+  );
+  if (/request timeout|AbortError/i.test(text)) return "FETCH_TIMEOUT";
+  if (/ECONNRESET|UND_ERR_SOCKET|socket.*closed|terminated/i.test(text)) return "ECONNRESET";
+  if (/ECONNREFUSED|fetch failed|network/i.test(text)) return "SERVER_UNAVAILABLE";
+  return "NETWORK_ERROR";
+}
+
+async function assertServerAvailable(): Promise<void> {
+  const origin = new URL(AGENT_URL).origin;
+  try {
+    await fetch(origin, {
+      method: "GET",
+      signal: AbortSignal.timeout(SERVER_HEALTH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new EvalTransportError(
+      `Next.js endpoint is unavailable at ${origin}: ${error instanceof Error ? error.message : String(error)}`,
+      "SERVER_UNAVAILABLE",
+    );
+  }
+}
+
+async function readSseResponse(
+  response: Response,
+  controller: AbortController,
+): Promise<{ text: string; receivedBytes: number; firstByteMs: number | null; doneSeen: boolean }> {
+  if (!response.body) {
+    const text = await response.text();
+    return { text, receivedBytes: Buffer.byteLength(text), firstByteMs: null, doneSeen: text.includes("data: [DONE]") };
+  }
+  const startedAt = Date.now();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let receivedBytes = 0;
+  let firstByteMs: number | null = null;
+  try {
+    while (true) {
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            idleTimer = setTimeout(() => {
+              controller.abort(new Error("SSE idle timeout"));
+              reject(new EvalTransportError(
+                `SSE produced no bytes for ${SSE_IDLE_TIMEOUT_MS}ms.`,
+                "SSE_IDLE_TIMEOUT",
+                receivedBytes,
+              ));
+            }, SSE_IDLE_TIMEOUT_MS);
+          }),
+        ]);
+        if (result.done) break;
+        receivedBytes += result.value.byteLength;
+        if (firstByteMs == null) firstByteMs = Date.now() - startedAt;
+        text += decoder.decode(result.value, { stream: true });
+      } finally {
+        if (idleTimer) clearTimeout(idleTimer);
+      }
+    }
+  } catch (error) {
+    if (error instanceof EvalTransportError) throw error;
+    throw new EvalTransportError(
+      error instanceof Error ? error.message : String(error),
+      classifyTransportError(error),
+      receivedBytes,
+    );
+  }
+  text += decoder.decode();
+  const doneSeen = text.includes("data: [DONE]");
+  if (!doneSeen) {
+    throw new EvalTransportError(
+      "SSE connection closed without a [DONE] marker.",
+      "SSE_CLOSED_WITHOUT_DONE",
+      receivedBytes,
+    );
+  }
+  return { text, receivedBytes, firstByteMs, doneSeen };
 }
 
 function isTransientNetworkError(error: unknown): boolean {
@@ -270,27 +381,60 @@ async function callAgent(
   };
   let networkRetryCount = 0;
   let rateLimitRetryCount = 0;
+  let transportFailure: TransportFailure | null = null;
+  let firstByteMs: number | null = null;
+  let requestDurationMs = 0;
 
   for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt += 1) {
     let res: Response;
+    const requestStartedAt = Date.now();
+    const controller = new AbortController();
+    const requestTimeout = setTimeout(
+      () => controller.abort(new Error("Agent eval request timeout")),
+      REQUEST_TIMEOUT_MS,
+    );
+    let receivedBytes = 0;
     try {
+      await assertServerAvailable();
       res = await fetch(AGENT_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Cookie: `${cookie.name}=${cookie.value}`,
           Accept: "text/event-stream",
+          "X-Agent-Eval-Request-Id": `eval-${baseRevision}-${attempt}-${Date.now()}`,
         },
         body: JSON.stringify({ projectId: PROJECT_ID, message }),
+        signal: controller.signal,
       });
-      const text = await res.text();
+      const streamed = await readSseResponse(res, controller);
+      const text = streamed.text;
+      receivedBytes = streamed.receivedBytes;
+      firstByteMs = streamed.firstByteMs;
+      requestDurationMs = Date.now() - requestStartedAt;
       const sse = parseSse(text);
       last = { status: res.status, text, sse };
     } catch (error) {
+      requestDurationMs = Date.now() - requestStartedAt;
+      const failure = error instanceof EvalTransportError
+        ? error
+        : new EvalTransportError(
+            error instanceof Error ? error.message : String(error),
+            classifyTransportError(error),
+            receivedBytes,
+          );
+      transportFailure = failure.code;
+      receivedBytes = Math.max(receivedBytes, failure.receivedBytes);
       if (!isTransientNetworkError(error)) {
-        throw error;
+        if (!(error instanceof EvalTransportError)) throw error;
       }
-      if (attempt >= RATE_LIMIT_MAX_RETRIES) {
+      // Once an SSE response has begun, the operation may still be executing or
+      // committing. Retrying would risk two concurrent operations for one eval.
+      if (
+        failure.code === "SERVER_UNAVAILABLE" ||
+        receivedBytes > 0 ||
+        attempt >= RATE_LIMIT_MAX_RETRIES
+      ) {
         return {
           ...last,
           rateLimitFailure: false,
@@ -298,6 +442,9 @@ async function callAgent(
           rateLimitRetryCount,
           networkFailure: true,
           ambiguousCommittedResponse: false,
+          transportFailure,
+          firstByteMs,
+          requestDurationMs,
         };
       }
       const latest = await latestRevision(admin);
@@ -309,6 +456,9 @@ async function callAgent(
           rateLimitRetryCount,
           networkFailure: false,
           ambiguousCommittedResponse: true,
+          transportFailure,
+          firstByteMs,
+          requestDurationMs,
         };
       }
       networkRetryCount += 1;
@@ -316,6 +466,8 @@ async function callAgent(
       console.warn(`Network retry ${networkRetryCount} after transient failure — waiting ${waitMs}ms`);
       await sleep(waitMs);
       continue;
+    } finally {
+      clearTimeout(requestTimeout);
     }
 
     const rateLimited =
@@ -331,6 +483,9 @@ async function callAgent(
         rateLimitRetryCount,
         networkFailure: false,
         ambiguousCommittedResponse: false,
+        transportFailure: null,
+        firstByteMs,
+        requestDurationMs,
       };
     }
     if (attempt >= RATE_LIMIT_MAX_RETRIES) break;
@@ -354,6 +509,9 @@ async function callAgent(
     rateLimitRetryCount,
     networkFailure: false,
     ambiguousCommittedResponse: false,
+    transportFailure,
+    firstByteMs,
+    requestDurationMs,
   };
 }
 
@@ -428,6 +586,9 @@ type ScenarioReport = {
     rateLimitRetryCount: number;
     ambiguousCommittedResponse: boolean;
     networkFailure: boolean;
+    transportFailure: TransportFailure | null;
+    firstByteMs: number | null;
+    requestDurationMs: number;
   };
   restore?: { status: number; revisionAfterRestore: number };
 };
@@ -451,6 +612,9 @@ async function runScenario(
     rateLimitRetryCount,
     ambiguousCommittedResponse,
     networkFailure,
+    transportFailure,
+    firstByteMs,
+    requestDurationMs,
   } = await callAgent(admin, seeded.revision, cookie, scenario.message);
   const afterRow = await latestRevision(admin);
   const after = snapModel(BuildingModelV1Schema.parse(afterRow.model));
@@ -526,6 +690,9 @@ async function runScenario(
       rateLimitRetryCount,
       ambiguousCommittedResponse,
       networkFailure,
+      transportFailure,
+      firstByteMs,
+      requestDurationMs,
     },
   };
 
@@ -556,6 +723,9 @@ async function runScenario(
         validationErrors: score.checks.validationErrors,
         geometryValid: score.checks.geometryValid,
         visualRender: score.checks.visualRenderUsed,
+        transportFailure,
+        firstByteMs,
+        requestDurationMs,
       },
       null,
       0,

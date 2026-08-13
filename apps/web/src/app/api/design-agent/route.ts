@@ -19,6 +19,10 @@ import type { CompletionReport } from "@/agent/planning/taskPlan";
 import { getLatestRevision, parseModel, requireUser } from "@/lib/projects";
 
 const MAX_COMPLETION_CONTINUATIONS = 2;
+const REQUEST_TIMEOUT_MS = Number(
+  process.env.HOME_DESIGN_AGENT_REQUEST_TIMEOUT_MS ?? "300000",
+);
+const SSE_HEARTBEAT_MS = 15000;
 
 function buildContinuationPrompt(
   report: CompletionReport | undefined,
@@ -74,9 +78,24 @@ function truncateForSse(value: unknown, maxChars = 6000): unknown {
  *   data: [DONE]
  */
 export async function POST(request: Request) {
+  const requestStartedAt = Date.now();
+  const requestId =
+    request.headers.get("x-agent-eval-request-id") ??
+    `req-${requestStartedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const timing = (stage: string, detail: Record<string, unknown> = {}) =>
+    homeDesignAgentDevLog("request_timing", {
+      requestId,
+      stage,
+      elapsedMs: Date.now() - requestStartedAt,
+      ...detail,
+    });
+
+  timing("request_start");
   try {
     const { user, supabase } = await requireUser();
+    timing("auth_complete");
     const body = await request.json();
+    timing("body_parsed");
 
     const message =
       typeof body?.message === "string" ? body.message.trim() : "";
@@ -145,6 +164,7 @@ export async function POST(request: Request) {
         { status: 404 },
       );
     }
+    timing("project_load_complete");
 
     const latest = await getLatestRevision(projectId);
     if (!latest) {
@@ -153,6 +173,7 @@ export async function POST(request: Request) {
         { status: 404 },
       );
     }
+    timing("revision_load_complete", { revision: latest.revision });
 
     let baseModel: BuildingModelV1;
     try {
@@ -167,15 +188,34 @@ export async function POST(request: Request) {
     const operationId = `hdr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     const encoder = new TextEncoder();
+    const runAbortController = new AbortController();
+    const abortFromClient = () =>
+      runAbortController.abort(new Error("Client disconnected."));
+    request.signal.addEventListener("abort", abortFromClient, { once: true });
     const stream = new ReadableStream({
       async start(controller) {
+        let streamClosed = false;
         const send = (payload: unknown) => {
+          if (streamClosed || runAbortController.signal.aborted) return;
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
           );
         };
+        const heartbeat = setInterval(() => {
+          if (!streamClosed && !runAbortController.signal.aborted) {
+            controller.enqueue(encoder.encode(": heartbeat\n\n"));
+          }
+        }, SSE_HEARTBEAT_MS);
+        const timeout = setTimeout(() => {
+          timing("request_timeout", { timeoutMs: REQUEST_TIMEOUT_MS });
+          runAbortController.abort(
+            new Error(`Design agent request timed out after ${REQUEST_TIMEOUT_MS}ms.`),
+          );
+        }, REQUEST_TIMEOUT_MS);
+        timing("sse_open");
 
         let lastEmittedRevision: number | null = null;
+        let firstModelResponseObserved = false;
 
         const context: DesignAgentContext = {
           userId: user.id,
@@ -206,6 +246,22 @@ export async function POST(request: Request) {
             send({ type: "model", model, revision });
           },
           emitToolEvent: (payload) => {
+            if (!firstModelResponseObserved) {
+              firstModelResponseObserved = true;
+              timing("first_model_response", { via: "tool_call" });
+            }
+            if (payload.name === "render_preview") {
+              timing(payload.phase === "start" ? "render_start" : "render_finish", {
+                ok: payload.ok ?? null,
+                code: payload.code ?? null,
+              });
+            }
+            timing("tool_call", {
+              phase: payload.phase,
+              tool: payload.name,
+              ok: payload.ok ?? null,
+              code: payload.code ?? null,
+            });
             if (payload.phase === "end") {
               send({
                 type: "tool",
@@ -244,12 +300,23 @@ export async function POST(request: Request) {
             attempt <= MAX_COMPLETION_CONTINUATIONS;
             attempt += 1
           ) {
+            timing("agent_run_start", { continuationAttempt: attempt });
             result = await designRunner.run(homeDesignAgent, runMessage, {
               context,
               maxTurns: HOME_DESIGN_AGENT_MAX_TURNS,
+              signal: runAbortController.signal,
             });
+            if (!firstModelResponseObserved) {
+              firstModelResponseObserved = true;
+              timing("first_model_response", { via: "final_output" });
+            }
+            timing("agent_run_complete", { continuationAttempt: attempt });
 
             commitResult = await commitAgentOperation(context);
+            timing(commitResult.success ? "commit" : "commit_blocked", {
+              continuationAttempt: attempt,
+              code: "code" in commitResult ? commitResult.code ?? null : null,
+            });
             send({
               type: "commit",
               success: commitResult.success,
@@ -312,6 +379,7 @@ export async function POST(request: Request) {
 
           if (!commitResult.success) {
             discardAgentOperation(context);
+            timing("discard");
             const incomplete =
               commitResult.code === "INCOMPLETE_OPERATION" &&
               "completionReport" in commitResult;
@@ -395,9 +463,25 @@ export async function POST(request: Request) {
               : messageText,
           });
         } finally {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          controller.close();
+          clearTimeout(timeout);
+          clearInterval(heartbeat);
+          request.signal.removeEventListener("abort", abortFromClient);
+          if (!streamClosed && !request.signal.aborted) {
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            timing("sse_close");
+            streamClosed = true;
+            controller.close();
+          }
+          timing("request_end", {
+            aborted: runAbortController.signal.aborted,
+          });
         }
+      },
+      cancel(reason) {
+        timing("sse_cancel", {
+          reason: reason instanceof Error ? reason.message : String(reason ?? ""),
+        });
+        runAbortController.abort(reason);
       },
     });
 

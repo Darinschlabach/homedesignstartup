@@ -207,7 +207,24 @@ export async function getPreviewBrowser(): Promise<{
 
   sharedBrowser = await chromium.launch(resolved.launchOptions);
   sharedBackend = resolved.backend;
+  sharedBrowser.once("disconnected", () => {
+    sharedBrowser = null;
+    sharedBackend = null;
+  });
   return { browser: sharedBrowser, backend: sharedBackend };
+}
+
+export function getPreviewBrowserRuntimeDiagnostics() {
+  return {
+    connected: sharedBrowser?.isConnected() ?? false,
+    backend: sharedBackend,
+    contexts: sharedBrowser?.contexts().length ?? 0,
+    pages:
+      sharedBrowser?.contexts().reduce(
+        (count, context) => count + context.pages().length,
+        0,
+      ) ?? 0,
+  };
 }
 
 export function getPreviewBrowserDiagnostics() {

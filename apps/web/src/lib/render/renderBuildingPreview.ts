@@ -17,6 +17,7 @@ import {
   previewBrowserUnavailableError,
   type PreviewRenderBackend,
 } from "./previewBrowser";
+import type { BrowserContext, Page } from "playwright";
 
 export type RenderBuildingPreviewInput = {
   model: BuildingModelV1;
@@ -105,13 +106,16 @@ export async function renderBuildingPreview(
 
   const meshes = buildSceneMeshes(input.model);
 
+  let page: Page | null = null;
+  let browserContext: BrowserContext | null = null;
   try {
     const { browser, backend } = await getPreviewBrowser();
     const threeDir = path.dirname(resolveThreeModuleMin());
-    const page = await browser.newPage({
+    browserContext = await browser.newContext({
       viewport: { width, height },
       deviceScaleFactor: 1,
     });
+    page = await browserContext.newPage();
 
     await page.route("http://preview.local/**", async (route) => {
       const url = new URL(route.request().url());
@@ -306,8 +310,6 @@ export async function renderBuildingPreview(
       { meshes, camera, width, height },
     );
 
-    await page.close();
-
     if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
       return {
         success: false,
@@ -400,5 +402,11 @@ export async function renderBuildingPreview(
       requestedView: input.view,
       renderBackend: null,
     };
+  } finally {
+    if (browserContext) {
+      await browserContext.close().catch(() => undefined);
+    } else if (page && !page.isClosed()) {
+      await page.close().catch(() => undefined);
+    }
   }
 }
